@@ -15,6 +15,7 @@ Adapted files carry the original SPDX copyright header and an adaptation note:
 | `src/reducer/receipt.ts` | `src/sol-pi/extensions/evidence-preserving-reducer/receipt.ts` |
 | `src/reducer/source.ts` | `src/sol-pi/extensions/evidence-preserving-reducer/candidate.ts` |
 | `src/reducer/provider.ts` | `src/sol-pi/extensions/evidence-preserving-reducer/provider.ts` |
+| `src/observation-pack/*` | `src/sol-pi/extensions/observation-pack/*` (algorithm design; the mechanism differs, see the README) |
 
 What changed: the reduction policy is a Cordis/Schemastery `Config` rather than
 a `sol-pi.json` file; source identity and size are a purely computed digest
@@ -22,6 +23,13 @@ rather than a filesystem archive object; the complete log is recovered from the
 harness bash tool's canonical `spillPath`; the artifact is a harness session
 spill rather than a project-owned directory; and the audit trail uses
 `ctx.logger` rather than non-context session entries.
+
+ObservationPack is the larger divergence: SoL-Pi rewrites the per-request
+message projection, while SoL-DSH appends a `compaction/prune` shadow-price
+event and a `tool/result` surface replacement, because an out-of-tree plugin
+cannot write the plugin-owned event a harness message projection would require.
+The shared part is the policy — send a large result in full for its first few
+requests, then replace it with a retrievable placeholder.
 
 ### MIT License
 

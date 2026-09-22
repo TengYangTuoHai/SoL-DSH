@@ -14,7 +14,7 @@ tree, so no runtime API is common between them.
 | Mechanism | Status | Harness seam |
 |---|---|---|
 | Evidence-Preserving Reducer | implemented | `tools/post-execute` |
-| ObservationPack | planned | `ctx.sessions.registerMessageProjection` |
+| ObservationPack | implemented | `agent/pre-step` + surface replacement protocol |
 | Action Fusion | planned | agent-scoped tool registration |
 | Online Context Compact | planned | `BasicCompactionEngine` subclass |
 
@@ -41,6 +41,42 @@ likely-secret body, or an internal fault all fail open.
 
 The canonical tool value and the durable session log are never modified — only
 the model-facing content of that one call changes.
+
+### ObservationPack
+
+A large tool result is usually read once and then replayed into every later
+provider request. ObservationPack sends such a result in full for its first
+`fullSends` requests, then replaces it with a short placeholder that names an
+archived copy, so recall stays possible without replay.
+
+**Its mechanism is not the one SoL-Pi uses, and that is deliberate.** The
+comparable harness seam is `ctx.sessions.registerMessageProjection`, which
+rewrites derived history without touching stored events — but that seam needs a
+plugin-owned session event to describe the change, and an out-of-tree plugin
+cannot write one:
+
+- `Session.append` offers no way to mark an event `ignorable`;
+- the persistence read path refuses a log containing an unknown event type that
+  is not so marked (`validateStoredEvents` in `@deepseek-ai/dsh-session-persistence`).
+
+A plugin taking that route would produce a session log that **cannot be
+resumed**. SoL-DSH therefore uses the surface replacement protocol the harness
+already ships for exactly this purpose, the same one
+`@deepseek-ai/dsh-compaction-tool-result-pruner` uses:
+
+1. append a `compaction/prune` shadow-price event pricing the shadowed node;
+2. append the replacement `tool/result` immediately after it, with
+   `surfaceOp: { op: 'replace', … }` citing the shadowed seq.
+
+Both event types are known to the harness, the canonical value is untouched, and
+the original event stays in the log for replay and inspection. The compaction
+invariant validates `compaction/prune` on its own, so a bare prune outside a
+compaction transaction is legal.
+
+Eligibility is conservative: the node must still be a current surface node (so a
+previously packed node, whose original seq is now shadowed, is never revisited),
+entirely text (images and files are left alone rather than half-packed), larger
+than `minBytes`, and have `fullSends` assistant messages after it.
 
 ## Requirements
 
@@ -93,10 +129,13 @@ verified end to end yet; see Known limitations.
 
 ## Configuration
 
-Every field is declared in the exported Schemastery `Config` and validated by
-Cordis when the row loads. Override any of them in your profile's
-`cordis.patch.yml` by row id `sol-dsh-evidence-preserving-reducer`, or from the
-home-level patch.
+Each mechanism is a separate plugin row with its own schema, so either can be
+disabled without touching the other. Override any field in your profile's
+`cordis.patch.yml` by row id, or from the home-level patch. A patch replaces a
+row's whole `config` value rather than deep-merging it, so restate every key the
+row needs.
+
+### `sol-dsh-evidence-preserving-reducer`
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -113,6 +152,21 @@ home-level patch.
 Credentials are never part of this configuration: the harness `llm` seam
 resolves them from the adapter's own credential references.
 
+### `sol-dsh-observation-pack`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Whether the packer may replace surface results. |
+| `minBytes` | `8192` | Minimum UTF-8 size before a result becomes packable. |
+| `fullSends` | `3` | Assistant messages that must follow before packing. |
+| `maxPerPass` | `8` | Upper bound on replacements committed by one pass. |
+
+`fullSends` is what makes the replacement safe: a result is sent in full for
+that many requests, so the frontier agent has already had the original in
+context before the placeholder takes its place.
+
+### Both mechanisms
+
 **Unknown keys are ignored, not rejected.** Schemastery object schemas have no
 strict mode and the harness loader does not reject undeclared config keys, so a
 misspelled field is silently dropped rather than failing the load. SoL-Pi
@@ -124,8 +178,9 @@ which is generated from this same schema.
 
 ### Default command patterns
 
-Matched case-insensitively anywhere in the command string, so a compound command
-such as `cd app && pnpm test` still qualifies:
+The reducer's `commandPatterns`, matched case-insensitively anywhere in the
+command string, so a compound command such as `cd app && pnpm test` still
+qualifies:
 
 `lake build`, `lean`, `coq`, `cargo build|test|check|clippy`, `zig build`,
 `pytest`, `ctest`, `ninja`, `make`, `python -m pytest|unittest|py_compile`,
@@ -135,15 +190,16 @@ such as `cd app && pnpm test` still qualifies:
 ## Audit trail
 
 The plugin logs one line per decision through `ctx.logger` — why a candidate was
-skipped or refused, which receipt reason a reduction fell back on, and the
-byte/token accounting of an applied reduction.
+skipped or refused, which receipt reason a reduction fell back on, the
+byte/token accounting of an applied reduction, and each packed observation.
 
 Decision records deliberately do **not** use custom session events. In this
 harness the persistence read path refuses a log containing an event type it does
 not know unless that event carries `ignorable: true`, and `Session.append()`
 provides no way for a plugin to set that marker — so an out-of-tree plugin
 writing custom events would produce a session log that cannot be resumed. The
-accepted receipt itself is durable as that call's tool-result content.
+accepted receipt is durable as that call's tool-result content, and a packed
+observation is durable as a `compaction/prune` plus `tool/result` replacement.
 
 ## Known limitations
 
@@ -158,7 +214,7 @@ accepted receipt itself is durable as that call's tool-result content.
 - **Spill artifact on a refused shrink.** The source is persisted before the
   receipt is rendered, so a receipt that turns out not to be smaller than its
   source leaves an unused (but still valid, retrievable) artifact.
-- **No automated test suite.** The mechanism is verified by the smoke tests
+- **No automated test suite.** The mechanisms are verified by the smoke tests
   below, not by regression tests.
 - **Undeclared config keys are ignored.** See the note under Configuration.
 - **The reducer's own decision log is not persisted.** `ctx.logger` lines do not
@@ -170,6 +226,16 @@ accepted receipt itself is durable as that call's tool-result content.
   once it is a net loss.
 - **`maxChars` bounds delegation, not recovery.** A source larger than
   `maxChars` is skipped entirely rather than partially reduced.
+- **ObservationPack can archive a preview instead of the original.** When
+  `dsh-spill-policy` has already replaced a large result, the packer archives
+  that already-spilled preview rather than reusing the original artifact. The
+  chain still reaches the original — the preview carries its own locator — but
+  it costs a second artifact.
+- **ObservationPack is text-only.** A result carrying images or files is left
+  alone, because it cannot be archived as UTF-8 text.
+- **Overlap with a shipped package.** `@deepseek-ai/dsh-compaction-tool-result-pruner`
+  already trims over-budget results, but only when the compaction backend runs
+  it under pressure. ObservationPack is proactive, on a fixed request count.
 
 ## Verification
 
@@ -221,14 +287,41 @@ Had `stdout`/`stderr` `spillPath` recovery failed, those head quotes would have
 been unverifiable, validation would have refused the receipt, and the whole
 mechanism would have fallen back to the raw log.
 
+### Round 3 — ObservationPack surface replacement
+
+A four-step run whose first step produced a 25,370-byte result, with
+`fullSends` lowered to `1` so packing was reachable in a short run.
+
+| Measure | Result |
+|---|---|
+| Source result | `25,370` bytes, 260 lines |
+| Model-facing placeholder | `434` bytes |
+| Context removed | **98.3%** |
+| Shadow-price event | `compaction/prune`, `shadowedSeqs [18]`, `shadowedTokenCount 6351` |
+| Replacement | `tool/result` seq 26, cites seq 18, `surfaceOp { op: 'replace' }` |
+
+The frontier agent received the placeholder naming the archived locator instead
+of the original body, and reported it without the log ever being replayed.
+
+**The log stayed resumable.** Every event type written is one the harness
+already knows, and the session was then adopted again with
+`--session-id <id>`, which answered `RESUME_OK` with exit `0`. That is the
+property the projection-seam route would have failed: a plugin-owned event type
+would have made the persistence read path refuse this session entirely.
+
 ### Still unverified
 
 - **The notice-text fallback.** `probeReducerSource` prefers the canonical
   value, so the `bodyFromNotice` path that parses a persisted spill-policy
   notice has never been reached. It remains a fallback of last resort.
-- **Stderr-only capture.** Both rounds wrote to stderr. The stdout/stderr
+- **Stderr-only capture.** The reducer rounds wrote to stderr. The stdout/stderr
   assembly (`"\n[stderr]\n"` join) has only been observed with a small stdout
   banner and a large stderr.
+- **No resume of a packed session across a compaction.** Round 3 resumed
+  cleanly, but interplay between a packed placeholder and a later compaction
+  that shadows the same range has not been exercised.
+- **ObservationPack has not been observed at its shipped `fullSends: 3`.** The
+  verified run used `1`.
 
 ## Licence
 
