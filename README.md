@@ -216,8 +216,8 @@ A linked plugin keeps its own `node_modules`, so the shared harness packages
 appear twice — once as SoL-DSH's `devDependencies` (for type checking and
 standalone runs) and once in the running harness. At runtime the harness's peer
 interception supplies its own copies, which is what makes
-`@deepseek-ai/cordis` service identity line up. This has been verified: both
-mechanisms load and run from a linked checkout.
+`@deepseek-ai/cordis` service identity line up. This has been verified: every
+mechanism loads and runs from a linked checkout.
 
 **Do not add a `prepare` script.** An earlier revision ran `tsc` from
 `prepare` so a fresh clone would be immediately buildable. That hangs
@@ -227,6 +227,112 @@ pnpm's output, so the prompt is invisible and the command never returns. Build
 explicitly with `npm run build` instead, and make sure `lib/` exists before
 linking the bundle, because the harness loads built JS and never compiles
 TypeScript from a plugin.
+
+### When changes take effect
+
+`dsh plugin add` writes the profile's `package.json` and `node_modules`, and a
+running harness watching its own tree picks that up: the example probe session
+recorded a `request/header` with `reason: resume` at the exact second the profile
+changed, and began loading the mechanisms present in the bundle patch *at that
+moment*. Two consequences matter while iterating:
+
+- **Editing an out-of-tree bundle's `cordis.patch.yml` does NOT trigger a
+  reload.** The watcher's root is the harness checkout, not the linked package
+  directory, so a patch edit made after the last profile write is invisible until
+  a restart. A live session can therefore be running an older patch than the one
+  on disk — check the `request/header` history before trusting that a change
+  landed.
+- **A restart is the only way to guarantee the current patch is loaded.** Prefer
+  it whenever a change touched `cordis.patch.yml` or a plugin's built JS.
+
+### Verifying what is actually live
+
+Inspect a session log for each mechanism's signature. Counting raw strings in
+the log is **not** good enough, for two reasons learned the hard way:
+
+- `compaction/prune` alone proves nothing — the harness ships its own
+  `@deepseek-ai/dsh-compaction-tool-result-pruner` that also emits it.
+- A conversation *about* this plugin contains the same marker text a mechanism
+  emits. One session reported 198 occurrences of `[then_run:` while none of its
+  requests ever saw a `then_run` parameter; every one came from prose.
+
+So parse events, look only inside `tool/result` content, require the fusion
+marker at the start of its own block, and read the tool shadow from the last
+`request/header`:
+
+```sh
+for f in $(find "${DSH_HOME:-$HOME/.dsh}/sessions" -name 'session.v4.jsonl.zstd' -newermt '-10 minutes'); do
+  node -e '
+    const z = require("node:zlib"), fs = require("node:fs")
+    const b = fs.readFileSync(process.argv[1]), M = Buffer.from([0x28,0xB5,0x2F,0xFD])
+    const o = []; let i = 0
+    while ((i = b.indexOf(M, i)) !== -1) { o.push(i); i += 4 }
+    let text = ""
+    for (let k = 0; k < o.length; k++) {
+      const e = k + 1 < o.length ? o[k+1] : b.length
+      try { text += z.zstdDecompressSync(b.subarray(o[k], e)).toString("utf8") } catch {}
+    }
+    const events = text.split("\n").filter(Boolean)
+      .map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+    let reducer = 0, obspack = 0, fusion = 0
+    for (const e of events) {
+      if (e.type !== "tool/result") continue
+      const blocks = (e.data.message?.content ?? []).filter(x => x.type === "text")
+      const whole = blocks.map(x => x.text).join("\n")
+      if (whole.includes("sol_dsh_evidence_receipt_v1")) reducer++
+      if (whole.includes("sol_dsh_observation_v1")) obspack++
+      if (blocks.some(x => x.text.startsWith("[then_run:"))) fusion++
+    }
+    const compact = events.filter(e => e.type === "compaction/start").length
+    const tools = events.filter(e => e.type === "request/header").pop()?.data.header?.tools ?? []
+    const shadowed = tools.some(t => Object.keys(t.parameters?.properties ?? {}).includes("then_run"))
+    if (reducer || obspack || fusion || compact || shadowed) {
+      console.log(process.argv[1].split("session-")[1].slice(0, 8),
+        "reducer=" + reducer, "obspack=" + obspack, "fusion=" + fusion,
+        "compact=" + compact, "tools.shadowed=" + shadowed)
+    }
+  ' "$f"
+done
+```
+
+A session log is stored as appended zstd frames, so a single
+`zstdDecompressSync` returns only the first frame — scan for the magic bytes as
+above, or most of the events read as a single `session` header.
+
+`tools.shadowed=true` is the reliable signal that Action Fusion mounted, because
+it reads the tool schema the model actually received rather than any marker text.
+
+### Reverting one mechanism
+
+A profile's own `cordis.patch.yml` is applied after every bundle layer, so any
+mechanism can be turned off without touching this package.
+
+The other three are additive and need only their own `enabled: false`.
+
+**Restoring the stock compaction backend needs the row disabled, not
+`enabled: false`.** This engine is a class plugin, and a subclass cannot avoid
+its parent's constructor — `ctx.compaction` is registered there, before any
+config is read. So `enabled: false` still claims the service, and re-enabling
+`compaction-basic` beside it fails with:
+
+```
+sol-dsh-context-compact (sol-dsh/context-compact):
+  Error: service "compaction" has been registered at <BasicCompactionEngine>
+```
+
+The harness contains that failure as a warning and the stock backend still
+serves compaction, but the boot is noisy. Disable the row instead:
+
+```yaml
+- id: compaction-basic
+  disabled: false
+- id: sol-dsh-context-compact
+  disabled: true
+```
+
+`enabled: false` remains the right switch for keeping the engine mounted while
+making every decision the stock one — for example to A/B the gate without
+changing which services are composed.
 
 ## Configuration
 
