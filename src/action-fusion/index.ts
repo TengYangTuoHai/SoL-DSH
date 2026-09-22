@@ -49,6 +49,19 @@ import type {
   ToolRunContext,
 } from '@deepseek-ai/dsh-tools'
 import { errorMessage, isRecord, recordValue } from '../shared/digest.js'
+import {
+  observationBlocks,
+  parseThenRun,
+  THEN_RUN_FAILED,
+  THEN_RUN_SKIPPED,
+  THEN_RUN_SUCCEEDED,
+  splitThenRun,
+  THEN_RUN_BLURB,
+  THEN_RUN_PARAM,
+  thenRunArguments,
+  withThenRun,
+  type ThenRunInput,
+} from './params.js'
 import { Config as ConfigSchema, type Config as ActionFusionConfig } from './config.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -60,97 +73,10 @@ export const inject = ['agents', 'tools'] as const
 /** Cordis reads this schema to validate the bundle layer and fill defaults. */
 export const Config = ConfigSchema
 
-/** Markers the model can read at a glance, and that a later reader can search for. */
-export const THEN_RUN_SUCCEEDED = '[then_run:succeeded]' as const
-export const THEN_RUN_FAILED = '[then_run:failed]' as const
-export const THEN_RUN_SKIPPED = '[then_run:skipped]' as const
-
-/** Guidance appended to a fused tool's description. */
-const THEN_RUN_BLURB =
-  ' Optionally chain one shell command that runs only after this call succeeds — '
-  + 'use it for the test, build, or start step that would otherwise be your next call. '
-  + 'If the mutation fails the command is skipped; a non-zero exit is reported but keeps the mutation.'
-
-/** The `then_run` parameter added to every fused tool. */
-const THEN_RUN_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    command: {
-      type: 'string',
-      description: 'Shell command to run next on this file after the mutation succeeds.',
-    },
-    description: {
-      type: 'string',
-      description: 'Clear, concise description of what the command does, 5-10 words (shown in the UI).',
-    },
-    timeoutMs: {
-      type: 'number',
-      description: 'Timeout in milliseconds for the follow-up command.',
-    },
-  },
-  required: ['command'],
-} as const
-
-/** One parsed `then_run` request. */
-interface ThenRunInput {
-  readonly command: string
-  readonly description: string | undefined
-  readonly timeoutMs: number | undefined
-}
 
 /** Per-call command observations awaiting the finalizeContent hook. */
 const pendingObservations = new Map<string, ContentBlock[]>()
 
-/**
- * Extend one base tool definition's parameter schema with `then_run`.
- *
- * The compiled root carries no `additionalProperties: false`, so the synthetic
- * argument object may be handed to the base `execute` unchanged — it ignores
- * the extra key — while the model still sees `then_run` in the schema.
- */
-function withThenRun(parameters: Record<string, unknown>): Record<string, unknown> {
-  const properties = isRecord(parameters['properties']) ? parameters['properties'] : {}
-  return { ...parameters, properties: { ...properties, then_run: THEN_RUN_SCHEMA } }
-}
-
-/** Parse one `then_run` value, or `undefined` when it cannot name a command. */
-function parseThenRun(value: unknown, fallbackDescription: string, defaultTimeoutMs: number): ThenRunInput | undefined {
-  if (!isRecord(value)) return undefined
-  const command = recordValue(value, 'command')
-  if (typeof command !== 'string' || command.trim() === '') return undefined
-  const rawDescription = recordValue(value, 'description')
-  const description = typeof rawDescription === 'string' && rawDescription.trim() !== ''
-    ? rawDescription
-    : fallbackDescription
-  const rawTimeout = recordValue(value, 'timeoutMs')
-  const timeoutMs = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout) && rawTimeout > 0
-    ? rawTimeout
-    : defaultTimeoutMs
-  return { command, description, timeoutMs }
-}
-
-/**
- * Human-readable header for one command observation.
- *
- * The marker follows the COMMAND's outcome, not the tool call's. In this
- * harness a non-zero exit is a successful shell call describing a failed
- * command, so reading `isError` alone would label a failing build as a success —
- * the most decision-relevant case this mechanism produces.
- */
-function observationHeader(outcome: ToolExecutionResult): string {
-  if (outcome.isError) return `${THEN_RUN_FAILED} the command did not run: ${outcome.error.message}`
-  const exitCode = recordValue(outcome.value, 'exitCode')
-  if (typeof exitCode !== 'number') return `${THEN_RUN_SUCCEEDED} the command ran (no exit status reported)`
-  return exitCode === 0
-    ? `${THEN_RUN_SUCCEEDED} exit=0`
-    : `${THEN_RUN_FAILED} exit=${exitCode} (the mutation was applied and kept)`
-}
-
-/** The observation grafted onto the model-facing content. */
-function observationBlocks(outcome: ToolExecutionResult): ContentBlock[] {
-  return [{ type: 'text', text: observationHeader(outcome) }, ...outcome.content]
-}
 
 /**
  * Dispatch the follow-up command through the normal tool pipeline.
@@ -172,13 +98,7 @@ async function dispatchThenRun(
     callId: brandToolCallId(`${String(exec.callId)}:then-run:1`) as ToolCallId,
     rootCallId: exec.rootCallId,
     name: config.shellTool,
-    arguments: {
-      command: input.command,
-      description: input.description ?? `Run the follow-up command for ${toolName}`,
-      // Omitted rather than set to `undefined`: arguments cross a lossless-JSON
-      // boundary, and `undefined` is not a JSON value.
-      ...input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs },
-    },
+    arguments: thenRunArguments(input, toolName),
     ...agent === undefined ? {} : { agent },
     signal: exec.signal,
   })
@@ -316,3 +236,5 @@ export function apply(ctx: Context, config: ActionFusionConfig): void {
     `sol-dsh: action fusion active (fusing ${config.tools.join(', ')} with ${config.shellTool})`,
   )
 }
+
+export { THEN_RUN_FAILED, THEN_RUN_SKIPPED, THEN_RUN_SUCCEEDED } from './params.js'

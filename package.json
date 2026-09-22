@@ -46,6 +46,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
     "clean": "rm -rf lib"
   },
   "keywords": [
@@ -76,7 +78,8 @@
     "@deepseek-ai/dsh-token-meter": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-tools": "0.1.7-alpha.1",
     "@types/node": "^22.10.2",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.3"

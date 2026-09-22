@@ -37,7 +37,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
-import { digestOf, errorMessage, type SourceDigest } from '../shared/digest.js'
+import { errorMessage } from '../shared/digest.js'
+import { OBSERVATION_SUFFIX, packable, placeholderText } from './placeholder.js'
 import { Config as ConfigSchema, type Config as ObservationPackConfig } from './config.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -48,36 +49,6 @@ export const inject = ['tokenMeter', 'spillStore'] as const
 
 /** Cordis reads this schema to validate the bundle layer and fill defaults. */
 export const Config = ConfigSchema
-
-/** First line of every placeholder, so a packed result is recognizable at a glance. */
-export const PLACEHOLDER_HEADER = 'sol_dsh_observation_v1' as const
-
-/**
- * Flatten a result that is entirely text, or `undefined` when it carries any
- * non-text block. Images and files cannot be archived as UTF-8 text, so those
- * results are left alone rather than half-packed.
- */
-function textOnly(content: readonly ContentBlock[]): string | undefined {
-  let text = ''
-  for (const block of content) {
-    if (block.type !== 'text') return undefined
-    text += text === '' ? block.text : `\n${block.text}`
-  }
-  return text
-}
-
-/** The short stand-in that replaces a packed result. */
-function placeholderText(toolName: string, digest: SourceDigest, locator: string, readback: string): string {
-  return [
-    PLACEHOLDER_HEADER,
-    `tool=${toolName}`,
-    `bytes=${digest.bytes} lines=${digest.lines}`,
-    `sha256=${digest.hash}`,
-    `locator=${locator}`,
-    `readback=${readback}`,
-    'note=the complete result is archived; read the locator when exact context is needed',
-  ].join('\n')
-}
 
 /** One current-surface tool result, with its position in model-visible order. */
 interface Candidate {
@@ -133,10 +104,9 @@ async function packAgent(ctx: Context, config: ObservationPackConfig, agent: Age
   for (const candidate of candidates) {
     if (replaced >= config.maxPerPass) break
     const original = candidate.event.data.message as ToolResultMessage
-    const body = textOnly(original.content)
-    if (body === undefined) continue
-    const digest = digestOf(body)
-    if (digest.bytes < config.minBytes) continue
+    const candidateBody = packable(original.content, config.minBytes)
+    if (candidateBody === undefined) continue
+    const { body, digest } = candidateBody
 
     // Archive first: a replacement whose original is unreachable would destroy
     // the observation instead of deferring it.
@@ -148,16 +118,11 @@ async function packAgent(ctx: Context, config: ObservationPackConfig, agent: Age
         callId: original.source.callId,
         label: 'observation-pack',
       },
-      suggestedName: `${digest.hash.slice(0, 16)}.observation.log`,
+      suggestedName: `${digest.hash.slice(0, 16)}${OBSERVATION_SUFFIX}`,
       content: body,
     })
 
-    const placeholder = placeholderText(
-      'tool/result',
-      digest,
-      artifact.locator,
-      artifact.retrievalHint,
-    )
+    const placeholder = placeholderText(digest, artifact.locator, artifact.retrievalHint)
     const message = freezeMessage<ToolResultMessage>({
       ...original,
       content: [{ type: 'text', text: placeholder }],

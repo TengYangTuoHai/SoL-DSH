@@ -84,3 +84,52 @@ export const Config = Schema.object({
 
 /** One validated row configuration. */
 export type Config = EconomicsConfig & Record<string, unknown>
+
+/** The stock backend's own accepted configuration keys. */
+const BASE_CONFIG_KEYS: ReadonlySet<string> = new Set(
+  Object.keys((BasicCompactionEngine.Config as unknown as { dict: Record<string, unknown> }).dict),
+)
+
+/** The stock backend's accepted configuration keys, sorted, for tests and diagnostics. */
+export const BASE_CONFIG_KEY_LIST: readonly string[] = [...BASE_CONFIG_KEYS].sort()
+
+/**
+ * Narrow one validated row configuration to the fields the stock backend accepts.
+ *
+ * The base constructor runs a strict key check that rejects anything it does not
+ * know, so the economics fields must be stripped before `super()` sees them —
+ * otherwise construction throws and, because this row replaces the stock one,
+ * the composition is left with no compaction service at all.
+ * @param config - the fully validated row configuration.
+ * @returns only the keys the stock `BasicCompactionEngine` recognizes.
+ */
+export function baseConfigOf(config: Record<string, unknown>): Record<string, unknown> {
+  const base: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    if (BASE_CONFIG_KEYS.has(key)) base[key] = value
+  }
+  return base
+}
+
+/**
+ * Read the economics fields, falling back to the shipped default per field.
+ * @param config - the fully validated row configuration.
+ * @returns every economics field with its effective value.
+ */
+export function economicsOf(config: Record<string, unknown>): EconomicsConfig {
+  const pick = <K extends keyof EconomicsConfig>(key: K): EconomicsConfig[K] => {
+    const value = config[key as string]
+    return (value === undefined ? DEFAULT_ECONOMICS_CONFIG[key] : value) as EconomicsConfig[K]
+  }
+  return {
+    enabled: pick('enabled'),
+    memoTokenEstimate: pick('memoTokenEstimate'),
+    cacheWriteReadRatio: pick('cacheWriteReadRatio'),
+    remainingRequestScale: pick('remainingRequestScale'),
+    remainingRequestStddevK: pick('remainingRequestStddevK'),
+    windowReserveTokens: pick('windowReserveTokens'),
+    firstCompactionRequestScale: pick('firstCompactionRequestScale'),
+    subsequentCompactionMargin: pick('subsequentCompactionMargin'),
+    fallbackRequestsPerBoundary: pick('fallbackRequestsPerBoundary'),
+  }
+}

@@ -41,7 +41,7 @@ import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { errorMessage, recordValue } from '../shared/digest.js'
-import { Config as ConfigSchema, DEFAULT_ECONOMICS_CONFIG, type EconomicsConfig } from './config.js'
+import { baseConfigOf, Config as ConfigSchema, economicsOf, type EconomicsConfig } from './config.js'
 import { decideCompaction, type CompactionDecision, type CompactionEconomics } from './economics.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -85,45 +85,7 @@ interface BoundaryReading {
   readonly remaining: number | undefined
 }
 
-/** The stock backend's own accepted configuration keys. */
-const BASE_CONFIG_KEYS: ReadonlySet<string> = new Set(
-  Object.keys((BasicCompactionEngine.Config as unknown as { dict: Record<string, unknown> }).dict),
-)
 
-/**
- * Narrow one validated row configuration to the fields the stock backend accepts.
- *
- * The base constructor runs a strict key check that rejects anything it does not
- * know, so the economics fields must be stripped before `super()` sees them —
- * otherwise construction throws and the composition is left with no compaction
- * service at all, because this row replaced the stock one.
- */
-function baseConfigOf(config: Record<string, unknown>): Record<string, unknown> {
-  const base: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(config)) {
-    if (BASE_CONFIG_KEYS.has(key)) base[key] = value
-  }
-  return base
-}
-
-/** Extract the economics fields from one validated row configuration. */
-function economicsOf(config: Record<string, unknown>): EconomicsConfig {
-  const pick = <K extends keyof EconomicsConfig>(key: K): EconomicsConfig[K] => {
-    const value = config[key as string]
-    return (value === undefined ? DEFAULT_ECONOMICS_CONFIG[key] : value) as EconomicsConfig[K]
-  }
-  return {
-    enabled: pick('enabled'),
-    memoTokenEstimate: pick('memoTokenEstimate'),
-    cacheWriteReadRatio: pick('cacheWriteReadRatio'),
-    remainingRequestScale: pick('remainingRequestScale'),
-    remainingRequestStddevK: pick('remainingRequestStddevK'),
-    windowReserveTokens: pick('windowReserveTokens'),
-    firstCompactionRequestScale: pick('firstCompactionRequestScale'),
-    subsequentCompactionMargin: pick('subsequentCompactionMargin'),
-    fallbackRequestsPerBoundary: pick('fallbackRequestsPerBoundary'),
-  }
-}
 
 /**
  * Cost-model-driven compaction backend.

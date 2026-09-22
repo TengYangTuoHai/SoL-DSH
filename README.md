@@ -668,3 +668,28 @@ wasted summarization attempt. See the limitations below.
 ## Licence
 
 MIT. Portions adapted from SoL-Pi; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Tests
+
+`npm test` runs the regression suite (vitest). `npm run check` chains typecheck,
+tests, and build.
+
+The suite covers only the pure decision surface, deliberately: the plugin
+entries need a live Cordis context and are exercised by the smoke runs instead.
+To make that surface testable, the logic worth pinning was extracted out of the
+entries — `context-compact/config.ts` (the config split the base constructor
+requires), `action-fusion/params.ts` (the parameter surface and observation
+markers), and `observation-pack/placeholder.ts` (the eligibility rule). Each
+extraction also removed a duplicated implementation from its entry.
+
+What the tests hold down, and why those properties:
+
+| Area | Property |
+|---|---|
+| Receipt validation | No unverifiable summary is accepted: quotes must appear byte for byte, the source hash and schema must match, the status must agree with the observed exit, and a failing log must carry failure evidence. Each refusal reason is a way a fluent but unfounded summary could otherwise reach the frontier agent. |
+| Reducer prompt | The log is fenced as untrusted, the command is hashed rather than embedded, and diagnosis is forbidden. |
+| Compaction economics | Window protection overrides cost; an unavailable horizon is reported as such rather than as "do not compact"; carried debt and the subsequent-margin gate can each defer a compaction that would otherwise pass. |
+| Config handling | Economics fields are stripped before the stock constructor's strict key check, and every surviving key is one it accepts. |
+| Command patterns | Build and test commands match; `ls`, `git status`, and words merely containing a pattern (`latest`, `remake`) do not. |
+| Action Fusion parameters | `then_run` stays optional, sandbox escalation fields survive, and the dispatched arguments stay losslessly JSON-serializable. |
+| Observation markers | The marker's status follows the command's exit, not the tool call's, and it terminates with a newline so a consumer cannot fuse it with the first output line. |
