@@ -123,9 +123,18 @@ pnpm dsh --profile <name>
 A linked plugin keeps its own `node_modules`, so the shared harness packages
 appear twice — once as SoL-DSH's `devDependencies` (for type checking and
 standalone runs) and once in the running harness. At runtime the harness's peer
-interception must supply its own copies, which is what makes
-`@deepseek-ai/cordis` service identity line up. That resolution has not been
-verified end to end yet; see Known limitations.
+interception supplies its own copies, which is what makes
+`@deepseek-ai/cordis` service identity line up. This has been verified: both
+mechanisms load and run from a linked checkout.
+
+**Do not add a `prepare` script.** An earlier revision ran `tsc` from
+`prepare` so a fresh clone would be immediately buildable. That hangs
+`dsh plugin add`: pnpm blocks a package's build scripts until the user approves
+them, prints an `allowBuilds` instruction, and waits — while `dsh plugin` pipes
+pnpm's output, so the prompt is invisible and the command never returns. Build
+explicitly with `npm run build` instead, and make sure `lib/` exists before
+linking the bundle, because the harness loads built JS and never compiles
+TypeScript from a plugin.
 
 ## Configuration
 
