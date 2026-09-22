@@ -1,0 +1,15 @@
+# SoL-DSH bundle layer.
+#
+# Applied when a profile lists this bundle (for example after
+# `dsh plugin --profile <name> add /path/to/SoL-DSH`). Every field below is
+# validated by the plugin's exported Schemastery `Config`; a profile or
+# home-level patch may override any of them by row id.
+- insert:
+    - id: sol-dsh-evidence-preserving-reducer
+      name: 'sol-dsh'
+      config:
+        enabled: true
+        minBytes: 4096
+        maxChars: 600000
+        maxOutputTokens: 2048
+        timeoutMs: 90000
