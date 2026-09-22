@@ -27,3 +27,13 @@
         minBytes: 8192
         fullSends: 3
         maxPerPass: 8
+
+    # Action Fusion: extend the mutation tools so one call can apply a change
+    # and run its follow-up command, collapsing two turns into one.
+    - id: sol-dsh-action-fusion
+      name: 'sol-dsh/action-fusion'
+      config:
+        enabled: true
+        tools: ['write', 'edit']
+        shellTool: 'bash'
+        defaultTimeoutMs: 120000

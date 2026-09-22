@@ -15,7 +15,7 @@ tree, so no runtime API is common between them.
 |---|---|---|
 | Evidence-Preserving Reducer | implemented | `tools/post-execute` |
 | ObservationPack | implemented | `agent/pre-step` + surface replacement protocol |
-| Action Fusion | planned | agent-scoped tool registration |
+| Action Fusion | implemented | agent-scoped tool shadowing + `ctx.tools.execute` |
 | Online Context Compact | planned | `BasicCompactionEngine` subclass |
 
 ### Evidence-Preserving Reducer
@@ -77,6 +77,53 @@ Eligibility is conservative: the node must still be a current surface node (so a
 previously packed node, whose original seq is now shadowed, is never revisited),
 entirely text (images and files are left alone rather than half-packed), larger
 than `minBytes`, and have `fullSends` assistant messages after it.
+
+### Action Fusion
+
+Rollouts repeatedly show the same pair of turns: edit or write a file, then run
+a command to test, build, or start it. Action Fusion extends each configured
+mutation tool with an optional `then_run`, so one call applies the mutation, runs
+the command, and returns one combined observation — the model decision between
+the two turns disappears.
+
+**Mechanism: wrap, do not reimplement.** The harness does not export the shipped
+`write`/`edit` definitions, so this plugin extends whatever is globally
+registered:
+
+1. `ctx.tools.get(name)` reads the global definition — its compiled JSON Schema,
+   canonical output contract, renderer, and presentation projections.
+2. A shadow is registered through `agent.ctx`. That is legal because the
+   duplicate check is **per layer**, and scoped registrations shadow inherited
+   ones; a global re-registration of `write` would throw.
+3. The shadow reuses the base `output` object untouched and forwards every other
+   member. The wrap therefore inherits the sandbox escalation fields
+   (`sandbox_permissions`, `justification`), the `fs/write-intent`
+   read-before-write gate, and the `write`/`edit` diff cards.
+
+The follow-up command is dispatched through `ctx.tools.execute()`, **not** by
+calling the shell executor directly, so it traverses the full pipeline —
+approval policy, monotonic guards, sandbox resolution, and result
+post-processing. A fused command is subject to exactly the same policy as one
+the model issued itself.
+
+The canonical value is never widened. `execute` returns the base mutation's value
+unchanged, and the command's observation is grafted onto the model-facing content
+in `finalizeContent`, the documented hook for a last-mile content transform. The
+value shape the shipped UI cards and programmatic callers expect is preserved.
+
+Three behaviours matter for correctness:
+
+- **A failed mutation skips the command entirely.** The base `execute` throws and
+  the exception propagates untouched.
+- **A failed command never rolls back the mutation.** A non-zero exit is a
+  *successful* shell call in this harness, so the plugin reports it in the
+  observation and keeps the edit — the same way the model would see it from a
+  separate call.
+- **The status marker follows the command, not the tool call.** Because a
+  non-zero exit is not an error, reading `isError` alone would label a failing
+  build as a success — the single most decision-relevant case. The marker reads
+  the exit status instead: `[then_run:succeeded] exit=0` versus
+  `[then_run:failed] exit=N (the mutation was applied and kept)`.
 
 ## Requirements
 
@@ -174,6 +221,19 @@ resolves them from the adapter's own credential references.
 that many requests, so the frontier agent has already had the original in
 context before the placeholder takes its place.
 
+### `sol-dsh-action-fusion`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Whether the fuser may shadow the configured tools. |
+| `tools` | `['write', 'edit']` | Tool names to extend with `then_run`. |
+| `shellTool` | `bash` | Shell tool the follow-up command is dispatched to. |
+| `defaultTimeoutMs` | `120000` | Fallback timeout when `then_run.timeoutMs` is absent. |
+
+A name in `tools` with no globally registered definition is skipped with a log
+line rather than registered from nothing: this plugin extends shipped tools, it
+does not own their schemas.
+
 ### Both mechanisms
 
 **Unknown keys are ignored, not rejected.** Schemastery object schemas have no
@@ -245,6 +305,17 @@ observation is durable as a `compaction/prune` plus `tool/result` replacement.
 - **Overlap with a shipped package.** `@deepseek-ai/dsh-compaction-tool-result-pruner`
   already trims over-budget results, but only when the compaction backend runs
   it under pressure. ObservationPack is proactive, on a fixed request count.
+- **Action Fusion shadows only the tools it names.** It does not touch the
+  persistent-shell, PowerShell, or `str_replace_editor` tools, and a tool mounted
+  after the agent is created is not picked up until the next reload.
+- **Action Fusion adds one nested call per fused call.** The follow-up still
+  costs a full tool dispatch (and its approval, if policy asks), so a fused call
+  is not free — it removes a model round trip, not the work.
+- **The shadow is per agent, not per composition.** Each agent receives its own
+  registration, so a composition with many agents holds one shadow each.
+- **A plugin that fails to activate does not stop the harness.** A bad `inject`
+  list surfaces as `dsh: warning: 1 entry did not activate` plus the Cordis error,
+  and the rest of the profile boots. Check for that line after changing a plugin.
 
 ## Verification
 
@@ -317,6 +388,36 @@ already knows, and the session was then adopted again with
 `--session-id <id>`, which answered `RESUME_OK` with exit `0`. That is the
 property the projection-seam route would have failed: a plugin-owned event type
 would have made the persistence read path refuse this session entirely.
+
+### Round 4 — Action Fusion
+
+Two runs against the shipped `write` tool.
+
+*Fused write and run, one call:*
+
+| Measure | Result |
+|---|---|
+| `tool/call` events | **1** — one call performed both the write and the execution |
+| Model-facing result | base write rendering, then `[then_run:succeeded]`, then `FUSED_OK` |
+| `write` parameters the model saw | `file_path, content, sandbox_permissions, justification, then_run` |
+| `edit` parameters the model saw | `file_path, old_string, new_string, replace_all, sandbox_permissions, justification, then_run` |
+| `required` | `["file_path","content"]` — `then_run` stayed optional |
+
+The sandbox escalation fields surviving is the evidence that wrapping preserved
+the shipped definition rather than rebuilding it.
+
+*Plain call and failing command, one call each:*
+
+| Measure | Result |
+|---|---|
+| `tool/call` events | 2 |
+| `then_run` markers across both results | **1** — only the fused call produced one |
+| Plain write result | no marker; the unfused path is untouched |
+| Failing command (`exit 7`) | `[then_run:failed] exit=7 (the mutation was applied and kept)` |
+| Filesystem | both files written, including the one whose command failed |
+
+That last row is the important one: a failing follow-up command is reported, not
+raised, and does not undo the mutation.
 
 ### Still unverified
 
