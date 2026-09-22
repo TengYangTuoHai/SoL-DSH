@@ -16,7 +16,7 @@ tree, so no runtime API is common between them.
 | Evidence-Preserving Reducer | implemented | `tools/post-execute` |
 | ObservationPack | implemented | `agent/pre-step` + surface replacement protocol |
 | Action Fusion | implemented | agent-scoped tool shadowing + `ctx.tools.execute` |
-| Online Context Compact | planned | `BasicCompactionEngine` subclass |
+| Online Context Compact | implemented | `BasicCompactionEngine` subclass + `compactIfNeeded` gate |
 
 ### Evidence-Preserving Reducer
 
@@ -124,6 +124,51 @@ Three behaviours matter for correctness:
   build as a success — the single most decision-relevant case. The marker reads
   the exit status instead: `[then_run:succeeded] exit=0` versus
   `[then_run:failed] exit=N (the mutation was applied and kept)`.
+
+### Online Context Compact
+
+The stock backend compacts automatically when the context crosses a fixed share
+of the window. That is a *pressure* rule: it says "the context is large", not
+"compacting now is worth its price". This mechanism subclasses the stock backend
+and puts a cost model in front of the automatic timing decision.
+
+Compacting is never free. It pays a summarization write, and on a cached route
+it pays an incremental cache write on the next request — every token the
+compaction removed has to be re-written once. It pays off only if the tokens it
+removes would otherwise be replayed in enough remaining requests to cover that
+cost.
+
+**Mechanism: subclass, gate, then delegate.**
+
+- `compactIfNeeded` is called by the base class's own `agent/pre-step` and
+  `agent/request-error` listeners, and the base keeps that call dynamically
+  dispatched so a subclass override is honoured at event time. The override is
+  the gate.
+- `context-overflow` is **never** gated. That path is corrective, not economic:
+  the provider already refused the request, so the only alternative to
+  compacting is failing.
+- Window protection overrides the cost comparison: within `windowReserveTokens`
+  of the limit, compaction proceeds regardless of price.
+- **An unavailable horizon is not evidence of waste.** When no plan is visible —
+  no todo list, no active goal — there is nothing to suggest the session is
+  ending, so the gate leaves the decision to the stock policy. Deferring there
+  would suppress compaction almost everywhere and let context grow until the
+  reserve fired, which is a regression, not an optimization.
+- Every fault inside the gate fails open to stock behaviour, because compaction
+  is a safety function and a bug here must cost money, not the session.
+
+The horizon comes from signals the harness already has: the live `todos`
+projection (a standing plan cleared each turn, so its open items are the work
+left in this scope), else an active goal's remaining rounds, else nothing — in
+which case the gate stands down.
+
+**Substituting the stock backend needs two patch steps.** A Cordis context holds
+exactly one `ctx.compaction` implementation, so this engine cannot mount beside
+the stock one. A patch may not change a row's `name` — the loader refuses that
+with a `name mismatch` warning and skips the entry — so the shipped patch
+disables the stock `compaction-basic` row and inserts this engine as its own
+row. A profile that prefers the stock backend can re-enable that row in a later
+patch layer.
 
 ## Requirements
 
@@ -234,6 +279,30 @@ A name in `tools` with no globally registered definition is skipped with a log
 line rather than registered from nothing: this plugin extends shipped tools, it
 does not own their schemas.
 
+### `sol-dsh-context-compact`
+
+This row also accepts **every stock compaction field** — `thresholdRatio`,
+`headroomTokens`, `retainRatio`, `retainTokens`, `summarizationProvider`,
+`summarizationModel`, `maxTokens`, `compactionRetries`, `maxOverflowRetries`,
+`modelPolicies`, `auto` — because its schema is the stock schema merged with the
+fields below.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Whether the cost model may defer automatic pressure compaction. |
+| `cacheWriteReadRatio` | `12.5` | Billed cache-write cost relative to a cache read. `0` makes every affordable compaction economic. |
+| `windowReserveTokens` | `16384` | Headroom below the window at which compaction is forced regardless of cost. |
+| `memoTokenEstimate` | `1200` | Estimated size of one replacement summary. |
+| `remainingRequestScale` | `1` | Multiplier on the estimated remaining requests. |
+| `remainingRequestStddevK` | `0` | Standard deviations subtracted from the per-boundary mean. |
+| `firstCompactionRequestScale` | `2` | Horizon multiplier granted to the first compaction. |
+| `subsequentCompactionMargin` | `1.5` | Extra margin a later compaction must clear. |
+| `fallbackRequestsPerBoundary` | `8` | Requests per boundary when none has been observed yet. |
+
+Setting `enabled: false` makes the engine delegate every decision to the stock
+policy, which is the supported way to turn the cost model off without editing
+the composition.
+
 ### Both mechanisms
 
 **Unknown keys are ignored, not rejected.** Schemastery object schemas have no
@@ -316,6 +385,25 @@ observation is durable as a `compaction/prune` plus `tool/result` replacement.
 - **A plugin that fails to activate does not stop the harness.** A bad `inject`
   list surfaces as `dsh: warning: 1 entry did not activate` plus the Cordis error,
   and the rest of the profile boots. Check for that line after changing a plugin.
+- **The compaction estimate is coarse.** `archiveTokens` is derived from the
+  retained-tail policy, while the backend picks its real range by balancing
+  tool-call pairs against checkpoint boundaries. The gate can therefore approve
+  a compaction that the backend then refuses as unprofitable. The backend's own
+  guard keeps this safe, but it can cost one wasted summarization attempt.
+- **Online Context Compact only gates the automatic path.** Manual `/compact`
+  still runs the stock `compactNow` untouched, and `context-overflow` recovery
+  is never gated.
+- **The horizon needs a visible plan.** With neither a todo list nor an active
+  goal, the gate stands down and behaviour is exactly the stock policy — which
+  means the cost model does nothing in the common plan-less session.
+- **Activation failure is contagious for `/compact`.** This engine replaces the
+  stock backend's row, so if it fails to mount, `command-compact` reports
+  `pending (waiting for service: compaction)` and compaction is unavailable
+  entirely. Test a configuration change before relying on it.
+- **The gated path has only been observed in short probe sessions.** Runs A2 and
+  B2 complete two to three steps before the model hits a token cap, so the
+  long-run behaviour of deferral — in particular whether repeated deferral
+  starves compaction until the window reserve fires — is unverified.
 
 ## Verification
 
@@ -418,6 +506,44 @@ the shipped definition rather than rebuilding it.
 
 That last row is the important one: a failing follow-up command is reported, not
 raised, and does not undo the mutation.
+
+### Round 5 — Online Context Compact
+
+Compaction is hard to force quickly, so these runs used a deliberately small
+window (`contextWindow: 30000`, `thresholdRatio: 0.25`, `headroomTokens: 8000`,
+`maxTokens: 4000`) and a 50 KB tool result to cross the threshold.
+
+*Substitution and mounting.* Disabling the stock `compaction-basic` row and
+inserting this engine composes cleanly: `--dump-config` shows the stock row
+`disabled: true` and this row beside it, and a boot reports no
+`did not activate` warning.
+
+*The gate decides, on the same session shape:*
+
+| Run | Visible plan | `cacheWriteReadRatio` | `compaction/start` |
+|---|---|---|---|
+| C (control) | none | gate disabled | **4** — stock behaviour intact |
+| A2 | 1 todo open | `12.5` | **0** — deferred |
+| B2 | 1 todo open | `0` | **1** — allowed |
+
+Run A2 and B2 are the same session shape and differ only in the cost ratio, so
+the difference is the gate. Run C proves the setup can compact at all and that
+disabling the gate restores the stock path.
+
+*The gate can approve a compaction the backend then declines.* In run B2 the
+allowed compaction ended immediately:
+
+```
+compaction/end  error: summary is not smaller than the shadowed content
+                (556 estimated framed tokens >= 86)
+```
+
+The gate estimated `archiveTokens` from the retained-tail policy (about 10,000
+tokens at that moment), but the backend's own range selection found only 86
+tokens it could actually shadow — it balances tool-call pairs against
+checkpoint boundaries, which the estimate does not model. The backend's own
+guard refused the pointless summary, so the outcome is safe; the cost is one
+wasted summarization attempt. See the limitations below.
 
 ### Still unverified
 

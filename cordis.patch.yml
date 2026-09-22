@@ -37,3 +37,30 @@
         tools: ['write', 'edit']
         shellTool: 'bash'
         defaultTimeoutMs: 120000
+
+    # Online Context Compact: the stock backend with a cost model in front of
+    # its automatic timing decision. The stock `compaction-basic` row is
+    # disabled below, because a Cordis context holds exactly one
+    # `ctx.compaction` implementation and two would collide.
+    - id: sol-dsh-context-compact
+      name: 'sol-dsh/context-compact'
+      config:
+        enabled: true
+        # Billed cache-write cost relative to a cache read. 0 disables the
+        # cache term, making every affordable compaction economic.
+        cacheWriteReadRatio: 12.5
+        # Tokens of headroom below the window at which compaction is forced
+        # regardless of cost.
+        windowReserveTokens: 16384
+        # Estimated size of one replacement summary, before it is written.
+        memoTokenEstimate: 1200
+
+# Disable the stock compaction backend, which this bundle replaces.
+#
+# A patch may not change a row's `name` — the loader refuses that with a
+# "name mismatch" warning and skips the entry — so the substitution is done in
+# two steps: turn the stock row off here, and insert the replacement above.
+# The row id and its `name` are left untouched, and a profile that wants the
+# stock backend back can re-enable this row in its own later patch layer.
+- id: compaction-basic
+  disabled: true

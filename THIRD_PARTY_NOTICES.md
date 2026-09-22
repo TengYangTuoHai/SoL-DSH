@@ -17,6 +17,7 @@ Adapted files carry the original SPDX copyright header and an adaptation note:
 | `src/reducer/provider.ts` | `src/sol-pi/extensions/evidence-preserving-reducer/provider.ts` |
 | `src/observation-pack/*` | `src/sol-pi/extensions/observation-pack/*` (algorithm design; the mechanism differs, see the README) |
 | `src/action-fusion/*` | `src/sol-pi/extensions/action-fusion/*` (the `then_run` idea and the skip-on-failed-mutation rule) |
+| `src/context-compact/*` | `src/sol-pi/extensions/online-context-compact/*` (the cost model itself: `economics.ts` is a near-verbatim port) |
 
 What changed: the reduction policy is a Cordis/Schemastery `Config` rather than
 a `sol-pi.json` file; source identity and size are a purely computed digest

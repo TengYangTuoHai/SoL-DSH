@@ -20,6 +20,10 @@
       "types": "./lib/action-fusion/index.d.ts",
       "default": "./lib/action-fusion/index.js"
     },
+    "./context-compact": {
+      "types": "./lib/context-compact/index.d.ts",
+      "default": "./lib/context-compact/index.js"
+    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -54,6 +58,7 @@
     "@deepseek-ai/cordis": "4.0.3",
     "@deepseek-ai/dsh-agent": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-compaction": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-llm": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-session": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-spill": "0.1.7-alpha.1",
@@ -64,6 +69,7 @@
     "@deepseek-ai/cordis": "4.0.3",
     "@deepseek-ai/dsh-agent": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-compaction": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-llm": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-session": "0.1.7-alpha.1",
     "@deepseek-ai/dsh-spill": "0.1.7-alpha.1",
